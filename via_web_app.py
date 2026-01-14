@@ -14,6 +14,7 @@ import re
 import numpy as np
 import random
 from typing import Dict, List, Optional
+from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
@@ -28,6 +29,7 @@ import logging
 WEBSITE_URL = 'https://ridewithvia.com'
 CONTENT_CACHE_FILE = 'via_website_content.json'
 EMBEDDING_MODEL = 'text-embedding-3-small'  # Fast and cost-effective
+QA_LOG_FILE = 'qa_log.csv'  # Log file for questions and answers
 
 # State coordinates for distance calculation (approximate centers)
 STATE_COORDINATES = {
@@ -653,6 +655,31 @@ def find_similar_articles(query: str, articles: List[Dict], client: OpenAI, top_
     # Return top K articles
     return [article for _, article in article_scores[:top_k]]
 
+def log_qa_pair(question: str, answer: str):
+    """Log question and answer to a CSV file."""
+    try:
+        # Create log entry
+        log_entry = {
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'question': question,
+            'answer': answer
+        }
+        
+        # Check if log file exists
+        file_exists = os.path.exists(QA_LOG_FILE)
+        
+        # Append to CSV file
+        df_new = pd.DataFrame([log_entry])
+        if file_exists:
+            # Append to existing file
+            df_new.to_csv(QA_LOG_FILE, mode='a', header=False, index=False, encoding='utf-8')
+        else:
+            # Create new file with header
+            df_new.to_csv(QA_LOG_FILE, mode='w', header=True, index=False, encoding='utf-8')
+    except Exception as e:
+        # Silently fail - don't interrupt user experience
+        pass
+
 def query_website_content(query: str, articles: List[Dict], client: OpenAI) -> str:
     """Use LLM to answer questions about website content using semantic search."""
     # Use semantic search to find most relevant articles
@@ -694,9 +721,17 @@ Answer based only on the content provided above. Include specific URLs when ment
             temperature=0.7,
             max_tokens=600
         )
-        return response.choices[0].message.content
+        answer = response.choices[0].message.content
+        
+        # Log the Q&A pair
+        log_qa_pair(query, answer)
+        
+        return answer
     except Exception as e:
-        return f"Error: {str(e)}"
+        error_msg = f"Error: {str(e)}"
+        # Log errors too
+        log_qa_pair(query, error_msg)
+        return error_msg
 
 # ============================================================================
 # STREAMLIT APP
@@ -818,12 +853,16 @@ def main():
                                 response = query_website_content(prompt, st.session_state.articles, client)
                             else:
                                 response = "I'm sorry, but I don't have access to the website content right now. Please refresh the cache or try again later."
+                                # Log this case too
+                                log_qa_pair(prompt, response)
                             st.markdown(response)
                             st.session_state.chat_history.append({"role": "assistant", "content": response})
                         except Exception as e:
                             error_msg = f"Error: {str(e)}"
                             st.error(error_msg)
                             st.session_state.chat_history.append({"role": "assistant", "content": error_msg})
+                            # Log errors too
+                            log_qa_pair(prompt, error_msg)
         
         with col2:
             st.header("📚 Recommended Articles")

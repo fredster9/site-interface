@@ -37,6 +37,7 @@ Thumbs.db
 
 # Logs
 *.log
+qa_log.csv
 
 # Output files
 rider_wrapped_observations_*.csv

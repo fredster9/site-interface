@@ -977,18 +977,22 @@ def main():
                         try:
                             if st.session_state.articles:
                                 response = query_website_content(prompt, st.session_state.articles, client)
+                                # query_website_content already logs the Q&A pair
                             else:
                                 response = "I'm sorry, but I don't have access to the website content right now. Please refresh the cache or try again later."
                                 # Log this case too
                                 log_qa_pair(prompt, response)
                             st.markdown(response)
                             st.session_state.chat_history.append({"role": "assistant", "content": response})
+                            # Show confirmation that it was logged
+                            st.caption("✅ Logged to qa_log.csv")
                         except Exception as e:
                             error_msg = f"Error: {str(e)}"
                             st.error(error_msg)
                             st.session_state.chat_history.append({"role": "assistant", "content": error_msg})
                             # Log errors too
                             log_qa_pair(prompt, error_msg)
+                            st.caption("✅ Logged to qa_log.csv")
         
         with col2:
             st.header("📚 Recommended Articles")

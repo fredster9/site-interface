@@ -677,7 +677,12 @@ def get_google_sheets_client():
             if 'google_sheets' in st.secrets and 'service_account_json' in st.secrets['google_sheets']:
                 creds_json = st.secrets['google_sheets']['service_account_json']
                 if isinstance(creds_json, str):
-                    creds_dict = json.loads(creds_json)
+                    # Try to parse as JSON string
+                    try:
+                        creds_dict = json.loads(creds_json)
+                    except json.JSONDecodeError:
+                        # If it's already a dict (Streamlit might parse it), use it directly
+                        creds_dict = creds_json if isinstance(creds_json, dict) else json.loads(creds_json.replace('\\n', '\n'))
                 else:
                     creds_dict = creds_json
                 creds = Credentials.from_service_account_info(creds_dict, scopes=[
@@ -685,7 +690,11 @@ def get_google_sheets_client():
                     'https://www.googleapis.com/auth/drive'
                 ])
                 return gspread.authorize(creds)
-        except (AttributeError, KeyError, FileNotFoundError):
+        except (AttributeError, KeyError, FileNotFoundError, json.JSONDecodeError) as e:
+            # Store error for debugging
+            if 'logging_errors' not in st.session_state:
+                st.session_state.logging_errors = []
+            st.session_state.logging_errors.append(f"Error loading credentials from secrets: {str(e)}")
             pass
         
         # Option 2: Service account file path (for local development)
@@ -735,32 +744,43 @@ def log_qa_pair(question: str, answer: str):
     # Try Google Sheets first
     try:
         client = get_google_sheets_client()
-        if client:
-            # Get spreadsheet ID and sheet name from secrets or use defaults
-            try:
-                spreadsheet_id = st.secrets.get('google_sheets', {}).get('spreadsheet_id') or GOOGLE_SHEETS_SPREADSHEET_ID
-                sheet_name = st.secrets.get('google_sheets', {}).get('sheet_name') or GOOGLE_SHEETS_SHEET_NAME
-            except (AttributeError, KeyError):
-                spreadsheet_id = GOOGLE_SHEETS_SPREADSHEET_ID
-                sheet_name = GOOGLE_SHEETS_SHEET_NAME
-            
-            if spreadsheet_id:
-                spreadsheet = client.open_by_key(spreadsheet_id)
-                try:
-                    worksheet = spreadsheet.worksheet(sheet_name)
-                except gspread.exceptions.WorksheetNotFound:
-                    # Create worksheet if it doesn't exist
-                    worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=3)
-                    # Add headers
-                    worksheet.append_row(['Timestamp', 'Question', 'Answer'])
-                
-                # Append the new row
-                worksheet.append_row([timestamp, question, answer])
-                return  # Success - no need for CSV fallback
+        if not client:
+            # No client available - fall through to CSV
+            raise Exception("Google Sheets client not available")
+        
+        # Get spreadsheet ID and sheet name from secrets or use defaults
+        try:
+            spreadsheet_id = st.secrets.get('google_sheets', {}).get('spreadsheet_id') or GOOGLE_SHEETS_SPREADSHEET_ID
+            sheet_name = st.secrets.get('google_sheets', {}).get('sheet_name') or GOOGLE_SHEETS_SHEET_NAME
+        except (AttributeError, KeyError):
+            spreadsheet_id = GOOGLE_SHEETS_SPREADSHEET_ID
+            sheet_name = GOOGLE_SHEETS_SHEET_NAME
+        
+        if not spreadsheet_id or spreadsheet_id == "your-spreadsheet-id-here":
+            raise Exception(f"Invalid spreadsheet ID: {spreadsheet_id}")
+        
+        spreadsheet = client.open_by_key(spreadsheet_id)
+        try:
+            worksheet = spreadsheet.worksheet(sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            # Create worksheet if it doesn't exist
+            worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=3)
+            # Add headers
+            worksheet.append_row(['Timestamp', 'Question', 'Answer'])
+        
+        # Append the new row
+        worksheet.append_row([timestamp, question, answer])
+        # Success - logging worked
+        return
     except Exception as e:
-        # Log error for debugging (but don't show to user)
-        logging.debug(f"Google Sheets logging failed: {e}")
-        pass  # Fall through to CSV backup
+        # Log error for debugging
+        error_msg = f"Google Sheets logging failed: {str(e)}"
+        logging.error(error_msg)
+        # Store error in session state for debugging (only show if debug mode)
+        if 'logging_errors' not in st.session_state:
+            st.session_state.logging_errors = []
+        st.session_state.logging_errors.append(error_msg)
+        # Fall through to CSV backup
     
     # Fallback to CSV file
     try:
@@ -935,6 +955,14 @@ def main():
         if st.session_state.show_logs:
             st.markdown("---")
             st.header("📊 Q&A Log")
+            
+            # Show logging errors if any
+            if 'logging_errors' in st.session_state and st.session_state.logging_errors:
+                with st.expander("⚠️ Logging Debug Info", expanded=True):
+                    st.warning("There were errors logging to Google Sheets. Check the details below:")
+                    for error in st.session_state.logging_errors[-5:]:  # Show last 5 errors
+                        st.code(error, language=None)
+                    st.info("The app is falling back to CSV logging. Check your Streamlit secrets configuration.")
             
             df_logs = None
             

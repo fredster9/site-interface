@@ -52,15 +52,40 @@ git push origin main
 ```toml
 [openai]
 api_key = "sk-proj-your-actual-api-key-here"
+
+[google_sheets]
+spreadsheet_id = "your-spreadsheet-id-here"
+sheet_name = "Q&A Log"
+service_account_json = '''
+{
+  "type": "service_account",
+  "project_id": "your-project-id",
+  "private_key_id": "your-key-id",
+  "private_key": "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n",
+  "client_email": "your-service-account@your-project.iam.gserviceaccount.com",
+  "client_id": "your-client-id",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/...",
+  "universe_domain": "googleapis.com"
+}
+'''
 ```
 
-**OR** alternatively:
+**OR** alternatively for OpenAI:
 
 ```toml
 OPENAI_API_KEY = "sk-proj-your-actual-api-key-here"
 ```
 
-The code supports both formats.
+**Google Sheets Setup:**
+1. Create a Google Sheet for logging
+2. Create a Google Cloud service account (or use existing)
+3. Download the service account JSON key
+4. Share the Google Sheet with the service account email (give Editor access)
+5. Copy the spreadsheet ID from the Google Sheet URL
+6. Paste the service account JSON into the secrets (as shown above)
 
 ### 4. Deploy!
 

@@ -22,6 +22,14 @@ import pandas as pd
 from openai import OpenAI
 import logging
 
+# Google Sheets imports
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSPREAD_AVAILABLE = True
+except ImportError:
+    GSPREAD_AVAILABLE = False
+
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
@@ -29,7 +37,9 @@ import logging
 WEBSITE_URL = 'https://ridewithvia.com'
 CONTENT_CACHE_FILE = 'via_website_content.json'
 EMBEDDING_MODEL = 'text-embedding-3-small'  # Fast and cost-effective
-QA_LOG_FILE = 'qa_log.csv'  # Log file for questions and answers
+GOOGLE_SHEETS_SPREADSHEET_ID = '1Qu26woHPnzzPcKUEY-_0QkORM5AZM2PGM38qB2FWpu4'  # Default spreadsheet ID
+GOOGLE_SHEETS_SHEET_NAME = 'Q&A Log'  # Default sheet name
+QA_LOG_FILE = 'qa_log.csv'  # Fallback CSV log file
 
 # State coordinates for distance calculation (approximate centers)
 STATE_COORDINATES = {
@@ -655,30 +665,119 @@ def find_similar_articles(query: str, articles: List[Dict], client: OpenAI, top_
     # Return top K articles
     return [article for _, article in article_scores[:top_k]]
 
-def log_qa_pair(question: str, answer: str):
-    """Log question and answer to a CSV file."""
+def get_google_sheets_client():
+    """Initialize Google Sheets client using Streamlit secrets."""
+    if not GSPREAD_AVAILABLE:
+        return None
+    
     try:
-        # Create log entry
+        # Try to get credentials from Streamlit secrets
+        try:
+            # Option 1: Service account JSON as string in secrets
+            if 'google_sheets' in st.secrets and 'service_account_json' in st.secrets['google_sheets']:
+                creds_json = st.secrets['google_sheets']['service_account_json']
+                if isinstance(creds_json, str):
+                    creds_dict = json.loads(creds_json)
+                else:
+                    creds_dict = creds_json
+                creds = Credentials.from_service_account_info(creds_dict, scopes=[
+                    'https://www.googleapis.com/auth/spreadsheets',
+                    'https://www.googleapis.com/auth/drive'
+                ])
+                return gspread.authorize(creds)
+        except (AttributeError, KeyError, FileNotFoundError):
+            pass
+        
+        # Option 2: Service account file path (for local development)
+        try:
+            if 'google_sheets' in st.secrets and 'credentials_path' in st.secrets['google_sheets']:
+                creds_path = st.secrets['google_sheets']['credentials_path']
+                creds = Credentials.from_service_account_file(creds_path, scopes=[
+                    'https://www.googleapis.com/auth/spreadsheets',
+                    'https://www.googleapis.com/auth/drive'
+                ])
+                return gspread.authorize(creds)
+        except (AttributeError, KeyError, FileNotFoundError):
+            pass
+        
+        # Option 3: Try default local credentials file paths (for local development)
+        # Try multiple possible paths relative to current working directory
+        script_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
+        default_creds_paths = [
+            'google_sheets_credentials.json',
+            os.path.join(script_dir, 'google_sheets_credentials.json'),
+            '../GitLab/rgrowth-all/Product_Education_Machine/Product Education Machine.json',
+            '../../GitLab/rgrowth-all/Product_Education_Machine/Product Education Machine.json',
+            os.path.join(script_dir, '../GitLab/rgrowth-all/Product_Education_Machine/Product Education Machine.json'),
+            os.path.join(script_dir, '../../GitLab/rgrowth-all/Product_Education_Machine/Product Education Machine.json'),
+        ]
+        
+        for creds_path in default_creds_paths:
+            full_path = os.path.abspath(creds_path) if not os.path.isabs(creds_path) else creds_path
+            if os.path.exists(full_path):
+                try:
+                    creds = Credentials.from_service_account_file(full_path, scopes=[
+                        'https://www.googleapis.com/auth/spreadsheets',
+                        'https://www.googleapis.com/auth/drive'
+                    ])
+                    return gspread.authorize(creds)
+                except Exception:
+                    continue
+        
+        return None
+    except Exception as e:
+        return None
+
+def log_qa_pair(question: str, answer: str):
+    """Log question and answer to Google Sheets (with CSV fallback)."""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    # Try Google Sheets first
+    try:
+        client = get_google_sheets_client()
+        if client:
+            # Get spreadsheet ID and sheet name from secrets or use defaults
+            try:
+                spreadsheet_id = st.secrets.get('google_sheets', {}).get('spreadsheet_id') or GOOGLE_SHEETS_SPREADSHEET_ID
+                sheet_name = st.secrets.get('google_sheets', {}).get('sheet_name') or GOOGLE_SHEETS_SHEET_NAME
+            except (AttributeError, KeyError):
+                spreadsheet_id = GOOGLE_SHEETS_SPREADSHEET_ID
+                sheet_name = GOOGLE_SHEETS_SHEET_NAME
+            
+            if spreadsheet_id:
+                spreadsheet = client.open_by_key(spreadsheet_id)
+                try:
+                    worksheet = spreadsheet.worksheet(sheet_name)
+                except gspread.exceptions.WorksheetNotFound:
+                    # Create worksheet if it doesn't exist
+                    worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=3)
+                    # Add headers
+                    worksheet.append_row(['Timestamp', 'Question', 'Answer'])
+                
+                # Append the new row
+                worksheet.append_row([timestamp, question, answer])
+                return  # Success - no need for CSV fallback
+    except Exception as e:
+        # Log error for debugging (but don't show to user)
+        logging.debug(f"Google Sheets logging failed: {e}")
+        pass  # Fall through to CSV backup
+    
+    # Fallback to CSV file
+    try:
         log_entry = {
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'timestamp': timestamp,
             'question': question,
             'answer': answer
         }
         
-        # Check if log file exists
         file_exists = os.path.exists(QA_LOG_FILE)
-        
-        # Append to CSV file
         df_new = pd.DataFrame([log_entry])
         if file_exists:
-            # Append to existing file
             df_new.to_csv(QA_LOG_FILE, mode='a', header=False, index=False, encoding='utf-8')
         else:
-            # Create new file with header
             df_new.to_csv(QA_LOG_FILE, mode='w', header=True, index=False, encoding='utf-8')
-    except Exception as e:
-        # Silently fail - don't interrupt user experience
-        pass
+    except Exception:
+        pass  # Silently fail - don't interrupt user experience
 
 def query_website_content(query: str, articles: List[Dict], client: OpenAI) -> str:
     """Use LLM to answer questions about website content using semantic search."""
@@ -751,6 +850,8 @@ def main():
         st.session_state.articles = []
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
+    if 'show_logs' not in st.session_state:
+        st.session_state.show_logs = False
     
     # Profile Collection Page
     if st.session_state.user_profile is None:
@@ -807,7 +908,7 @@ def main():
             st.stop()
         
         # Header
-        col1, col2, col3 = st.columns([3, 1, 1])
+        col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
         with col1:
             st.title("Via Content Hub")
         with col2:
@@ -821,10 +922,71 @@ def main():
                     os.remove(CONTENT_CACHE_FILE)
                 st.session_state.articles = []
                 st.rerun()
+        with col4:
+            if st.button("📊 View Logs"):
+                st.session_state.show_logs = not st.session_state.get('show_logs', False)
+                st.rerun()
         
         # Show user profile info
         user_type_display = "City" if user_profile['is_city'] else "Transit Agency"
         st.info(f"👤 Profile: {user_type_display} in {user_profile['state']}")
+        
+        # Show logs if requested
+        if st.session_state.show_logs:
+            st.markdown("---")
+            st.header("📊 Q&A Log")
+            
+            df_logs = None
+            
+            # Try to read from Google Sheets first
+            try:
+                client = get_google_sheets_client()
+                if client:
+                    try:
+                        spreadsheet_id = st.secrets.get('google_sheets', {}).get('spreadsheet_id') or GOOGLE_SHEETS_SPREADSHEET_ID
+                        sheet_name = st.secrets.get('google_sheets', {}).get('sheet_name') or GOOGLE_SHEETS_SHEET_NAME
+                    except (AttributeError, KeyError):
+                        spreadsheet_id = GOOGLE_SHEETS_SPREADSHEET_ID
+                        sheet_name = GOOGLE_SHEETS_SHEET_NAME
+                    
+                    if spreadsheet_id:
+                        spreadsheet = client.open_by_key(spreadsheet_id)
+                        worksheet = spreadsheet.worksheet(sheet_name)
+                        records = worksheet.get_all_records()
+                        if records:
+                            df_logs = pd.DataFrame(records)
+                            st.success(f"📊 Reading from Google Sheets: {len(df_logs)} Q&A pairs")
+            except Exception as e:
+                pass  # Fall through to CSV
+            
+            # Fallback to CSV file
+            if df_logs is None and os.path.exists(QA_LOG_FILE):
+                try:
+                    df_logs = pd.read_csv(QA_LOG_FILE)
+                    st.info(f"📄 Reading from local CSV file: {len(df_logs)} Q&A pairs")
+                except Exception as e:
+                    st.error(f"Error reading log file: {e}")
+            
+            if df_logs is not None and len(df_logs) > 0:
+                st.dataframe(df_logs, use_container_width=True, hide_index=True)
+                
+                # Download button
+                csv = df_logs.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Log as CSV",
+                    data=csv,
+                    file_name=f"qa_log_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv"
+                )
+                
+                st.info(f"Total Q&A pairs logged: {len(df_logs)}")
+            else:
+                st.info("No logs yet. Ask some questions to start logging!")
+            
+            if st.button("Close Logs"):
+                st.session_state.show_logs = False
+                st.rerun()
+            st.markdown("---")
         
         # Two columns: Chat and Recommendations
         col1, col2 = st.columns([2, 1])

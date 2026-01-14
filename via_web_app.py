@@ -1006,7 +1006,7 @@ def main():
                             with col1:
                                 if article.get('thumbnail'):
                                     try:
-                                        st.image(article['thumbnail'], width=100, use_container_width=False)
+                                        st.image(article['thumbnail'], width=100)
                                     except:
                                         st.write("")  # Empty space if image fails to load
                                 else:
@@ -1029,7 +1029,7 @@ def main():
                             with col1:
                                 if article.get('thumbnail'):
                                     try:
-                                        st.image(article['thumbnail'], width=100, use_container_width=False)
+                                        st.image(article['thumbnail'], width=100)
                                     except:
                                         st.write("")  # Empty space if image fails to load
                                 else:

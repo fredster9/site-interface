@@ -921,7 +921,7 @@ def main():
                     st.success(f"📄 Found {len(df_logs)} Q&A pairs in log file")
                     
                     if len(df_logs) > 0:
-                        st.dataframe(df_logs, use_container_width=True, hide_index=True)
+                        st.dataframe(df_logs, width='stretch', hide_index=True)
                         
                         # Download button
                         csv = df_logs.to_csv(index=False).encode('utf-8')

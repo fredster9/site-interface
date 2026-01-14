@@ -5,6 +5,7 @@ A Streamlit web app for ridewithvia.com that provides:
 1. User profile collection (city/agency, state)
 2. LLM-powered chat interface for website content
 3. Personalized article recommendations
+4. Q&A logging to CSV file
 """
 
 import streamlit as st
@@ -921,10 +922,19 @@ def main():
             st.markdown("---")
             st.header("📊 Q&A Log")
             
+            # Show file path info
+            import os
+            full_path = os.path.abspath(QA_LOG_FILE)
+            st.caption(f"File location: `{full_path}`")
+            
             if os.path.exists(QA_LOG_FILE):
                 try:
+                    # Get file size
+                    file_size = os.path.getsize(QA_LOG_FILE)
+                    st.success(f"📄 Found log file ({file_size} bytes)")
+                    
                     df_logs = pd.read_csv(QA_LOG_FILE)
-                    st.success(f"📄 Found {len(df_logs)} Q&A pairs in log file")
+                    st.success(f"✅ Loaded {len(df_logs)} Q&A pairs from log file")
                     
                     if len(df_logs) > 0:
                         st.dataframe(df_logs, width='stretch', hide_index=True)
@@ -943,9 +953,11 @@ def main():
                         st.info("Log file exists but is empty. Ask some questions to start logging!")
                 except Exception as e:
                     st.error(f"Error reading log file: {e}")
+                    st.code(str(e))
             else:
-                st.info("No logs yet. Ask some questions to start logging!")
-                st.info(f"Log file will be saved as: `{QA_LOG_FILE}`")
+                st.warning(f"Log file not found at: `{full_path}`")
+                st.info("Ask some questions to start logging!")
+                st.info(f"File will be created as: `{QA_LOG_FILE}`")
             
             if st.button("Close Logs"):
                 st.session_state.show_logs = False

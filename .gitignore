@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# Secrets and API keys
+openai_secrets.json
+*.secrets.json
+**/secrets.json
+**/.streamlit/secrets.toml
+.streamlit/secrets.toml
+
+# Cache files
+via_website_content.json
+cached_articles_list_*.txt
+
+# Streamlit
+.streamlit/secrets.toml
+**/.streamlit/secrets.toml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Output files
+rider_wrapped_observations_*.csv
+rider_wrapped_images_*/

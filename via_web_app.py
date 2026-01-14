@@ -754,9 +754,15 @@ def log_qa_pair(question: str, answer: str):
             df_new.to_csv(QA_LOG_FILE, mode='a', header=False, index=False, encoding='utf-8')
         else:
             df_new.to_csv(QA_LOG_FILE, mode='w', header=True, index=False, encoding='utf-8')
+        
+        # Debug: log that we successfully wrote
+        logging.info(f"Successfully logged Q&A pair to {QA_LOG_FILE}")
     except Exception as e:
         # Log error but don't interrupt user experience
         logging.error(f"Error logging Q&A pair: {e}")
+        # Also print to stderr for Streamlit logs
+        import sys
+        print(f"ERROR: Failed to log Q&A pair: {e}", file=sys.stderr)
 
 def query_website_content(query: str, articles: List[Dict], client: OpenAI) -> str:
     """Use LLM to answer questions about website content using semantic search."""

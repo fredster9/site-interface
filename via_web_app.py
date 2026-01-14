@@ -39,7 +39,7 @@ CONTENT_CACHE_FILE = 'via_website_content.json'
 EMBEDDING_MODEL = 'text-embedding-3-small'  # Fast and cost-effective
 GOOGLE_SHEETS_SPREADSHEET_ID = '1Qu26woHPnzzPcKUEY-_0QkORM5AZM2PGM38qB2FWpu4'  # Default spreadsheet ID
 GOOGLE_SHEETS_SHEET_NAME = 'Q&A Log'  # Default sheet name
-QA_LOG_FILE = 'qa_log.csv'  # Fallback CSV log file
+QA_LOG_FILE = 'qa_log.csv'  # CSV log file for Q&A pairs
 
 # State coordinates for distance calculation (approximate centers)
 STATE_COORDINATES = {

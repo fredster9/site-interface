@@ -738,51 +738,9 @@ def get_google_sheets_client():
         return None
 
 def log_qa_pair(question: str, answer: str):
-    """Log question and answer to Google Sheets (with CSV fallback)."""
+    """Log question and answer to CSV file."""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
-    # Try Google Sheets first
-    try:
-        client = get_google_sheets_client()
-        if not client:
-            # No client available - fall through to CSV
-            raise Exception("Google Sheets client not available")
-        
-        # Get spreadsheet ID and sheet name from secrets or use defaults
-        try:
-            spreadsheet_id = st.secrets.get('google_sheets', {}).get('spreadsheet_id') or GOOGLE_SHEETS_SPREADSHEET_ID
-            sheet_name = st.secrets.get('google_sheets', {}).get('sheet_name') or GOOGLE_SHEETS_SHEET_NAME
-        except (AttributeError, KeyError):
-            spreadsheet_id = GOOGLE_SHEETS_SPREADSHEET_ID
-            sheet_name = GOOGLE_SHEETS_SHEET_NAME
-        
-        if not spreadsheet_id or spreadsheet_id == "your-spreadsheet-id-here":
-            raise Exception(f"Invalid spreadsheet ID: {spreadsheet_id}")
-        
-        spreadsheet = client.open_by_key(spreadsheet_id)
-        try:
-            worksheet = spreadsheet.worksheet(sheet_name)
-        except gspread.exceptions.WorksheetNotFound:
-            # Create worksheet if it doesn't exist
-            worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=3)
-            # Add headers
-            worksheet.append_row(['Timestamp', 'Question', 'Answer'])
-        
-        # Append the new row
-        worksheet.append_row([timestamp, question, answer])
-        # Success - logging worked
-        return
-    except Exception as e:
-        # Log error for debugging
-        error_msg = f"Google Sheets logging failed: {str(e)}"
-        logging.error(error_msg)
-        # Store error in session state for debugging (only show if debug mode)
-        if 'logging_errors' not in st.session_state:
-            st.session_state.logging_errors = []
-        st.session_state.logging_errors.append(error_msg)
-        # Fall through to CSV backup
-    
-    # Fallback to CSV file
     try:
         log_entry = {
             'timestamp': timestamp,
@@ -796,8 +754,9 @@ def log_qa_pair(question: str, answer: str):
             df_new.to_csv(QA_LOG_FILE, mode='a', header=False, index=False, encoding='utf-8')
         else:
             df_new.to_csv(QA_LOG_FILE, mode='w', header=True, index=False, encoding='utf-8')
-    except Exception:
-        pass  # Silently fail - don't interrupt user experience
+    except Exception as e:
+        # Log error but don't interrupt user experience
+        logging.error(f"Error logging Q&A pair: {e}")
 
 def query_website_content(query: str, articles: List[Dict], client: OpenAI) -> str:
     """Use LLM to answer questions about website content using semantic search."""
@@ -956,60 +915,31 @@ def main():
             st.markdown("---")
             st.header("📊 Q&A Log")
             
-            # Show logging errors if any
-            if 'logging_errors' in st.session_state and st.session_state.logging_errors:
-                with st.expander("⚠️ Logging Debug Info", expanded=True):
-                    st.warning("There were errors logging to Google Sheets. Check the details below:")
-                    for error in st.session_state.logging_errors[-5:]:  # Show last 5 errors
-                        st.code(error, language=None)
-                    st.info("The app is falling back to CSV logging. Check your Streamlit secrets configuration.")
-            
-            df_logs = None
-            
-            # Try to read from Google Sheets first
-            try:
-                client = get_google_sheets_client()
-                if client:
-                    try:
-                        spreadsheet_id = st.secrets.get('google_sheets', {}).get('spreadsheet_id') or GOOGLE_SHEETS_SPREADSHEET_ID
-                        sheet_name = st.secrets.get('google_sheets', {}).get('sheet_name') or GOOGLE_SHEETS_SHEET_NAME
-                    except (AttributeError, KeyError):
-                        spreadsheet_id = GOOGLE_SHEETS_SPREADSHEET_ID
-                        sheet_name = GOOGLE_SHEETS_SHEET_NAME
-                    
-                    if spreadsheet_id:
-                        spreadsheet = client.open_by_key(spreadsheet_id)
-                        worksheet = spreadsheet.worksheet(sheet_name)
-                        records = worksheet.get_all_records()
-                        if records:
-                            df_logs = pd.DataFrame(records)
-                            st.success(f"📊 Reading from Google Sheets: {len(df_logs)} Q&A pairs")
-            except Exception as e:
-                pass  # Fall through to CSV
-            
-            # Fallback to CSV file
-            if df_logs is None and os.path.exists(QA_LOG_FILE):
+            if os.path.exists(QA_LOG_FILE):
                 try:
                     df_logs = pd.read_csv(QA_LOG_FILE)
-                    st.info(f"📄 Reading from local CSV file: {len(df_logs)} Q&A pairs")
+                    st.success(f"📄 Found {len(df_logs)} Q&A pairs in log file")
+                    
+                    if len(df_logs) > 0:
+                        st.dataframe(df_logs, use_container_width=True, hide_index=True)
+                        
+                        # Download button
+                        csv = df_logs.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label="📥 Download Log as CSV",
+                            data=csv,
+                            file_name=f"qa_log_{datetime.now().strftime('%Y%m%d')}.csv",
+                            mime="text/csv"
+                        )
+                        
+                        st.info(f"Total Q&A pairs logged: {len(df_logs)}")
+                    else:
+                        st.info("Log file exists but is empty. Ask some questions to start logging!")
                 except Exception as e:
                     st.error(f"Error reading log file: {e}")
-            
-            if df_logs is not None and len(df_logs) > 0:
-                st.dataframe(df_logs, use_container_width=True, hide_index=True)
-                
-                # Download button
-                csv = df_logs.to_csv(index=False)
-                st.download_button(
-                    label="📥 Download Log as CSV",
-                    data=csv,
-                    file_name=f"qa_log_{datetime.now().strftime('%Y%m%d')}.csv",
-                    mime="text/csv"
-                )
-                
-                st.info(f"Total Q&A pairs logged: {len(df_logs)}")
             else:
                 st.info("No logs yet. Ask some questions to start logging!")
+                st.info(f"Log file will be saved as: `{QA_LOG_FILE}`")
             
             if st.button("Close Logs"):
                 st.session_state.show_logs = False

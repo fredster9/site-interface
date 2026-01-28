@@ -5,7 +5,7 @@ A Streamlit web app for ridewithvia.com that provides:
 1. User profile collection (city/agency, state)
 2. LLM-powered chat interface for website content
 3. Personalized article recommendations
-4. Q&A logging to CSV file
+4. Q&A logging to Google Sheets (permanent) or CSV file (fallback)
 """
 
 import streamlit as st
@@ -666,6 +666,55 @@ def find_similar_articles(query: str, articles: List[Dict], client: OpenAI, top_
     # Return top K articles
     return [article for _, article in article_scores[:top_k]]
 
+def get_google_sheets_config_status() -> Dict:
+    """
+    Return a status dict for diagnostics (no secrets exposed).
+    Keys: 'configured' (bool), 'reason' (str), 'hint' (str).
+    """
+    if not GSPREAD_AVAILABLE:
+        return {
+            'configured': False,
+            'reason': 'gspread not installed',
+            'hint': 'Add gspread and google-auth to requirements.txt and redeploy.',
+        }
+    try:
+        secrets = getattr(st, 'secrets', None)
+        if not secrets:
+            return {
+                'configured': False,
+                'reason': 'No secrets available',
+                'hint': 'In Streamlit Cloud use App → Settings → Secrets. Locally use .streamlit/secrets.toml with a [google_sheets] section.',
+            }
+        if 'google_sheets' not in secrets:
+            return {
+                'configured': False,
+                'reason': 'No [google_sheets] section in secrets',
+                'hint': 'In Streamlit Cloud: App → Settings → Secrets. Add a [google_sheets] section with spreadsheet_id and service_account_json.',
+            }
+        gs = secrets.get('google_sheets', {})
+        if not gs.get('service_account_json'):
+            return {
+                'configured': False,
+                'reason': 'service_account_json missing in [google_sheets]',
+                'hint': 'Paste your full service account JSON (from Google Cloud Console) as service_account_json. In the JSON, keep private_key on one line with \\n for newlines.',
+            }
+        # Try to actually connect (without exposing secrets)
+        client = get_google_sheets_client()
+        if client is None:
+            return {
+                'configured': False,
+                'reason': 'Credentials present but connection failed',
+                'hint': 'Check: (1) JSON is valid and private_key uses \\n for newlines, (2) Sheet is shared with the service account email (Editor), (3) Google Sheets & Drive APIs are enabled.',
+            }
+        return {'configured': True, 'reason': 'OK', 'hint': ''}
+    except Exception as e:
+        return {
+            'configured': False,
+            'reason': f'Error checking config: {type(e).__name__}',
+            'hint': 'Add [google_sheets] with spreadsheet_id and service_account_json to Streamlit Secrets.',
+        }
+
+
 def get_google_sheets_client():
     """Initialize Google Sheets client using Streamlit secrets."""
     if not GSPREAD_AVAILABLE:
@@ -686,6 +735,10 @@ def get_google_sheets_client():
                         creds_dict = creds_json if isinstance(creds_json, dict) else json.loads(creds_json.replace('\\n', '\n'))
                 else:
                     creds_dict = creds_json
+                # Ensure private_key has real newlines if stored as \n
+                if isinstance(creds_dict.get('private_key'), str) and '\\n' in creds_dict['private_key']:
+                    creds_dict = dict(creds_dict)
+                    creds_dict['private_key'] = creds_dict['private_key'].replace('\\n', '\n')
                 creds = Credentials.from_service_account_info(creds_dict, scopes=[
                     'https://www.googleapis.com/auth/spreadsheets',
                     'https://www.googleapis.com/auth/drive'
@@ -738,35 +791,92 @@ def get_google_sheets_client():
     except Exception as e:
         return None
 
-def log_qa_pair(question: str, answer: str):
-    """Log question and answer to CSV file."""
+
+def _get_worksheet(spreadsheet, sheet_name: str):
+    """Get worksheet by name, or first sheet if name not found (for your 'question'/'answer' tab)."""
+    try:
+        return spreadsheet.worksheet(sheet_name)
+    except gspread.exceptions.WorksheetNotFound:
+        pass
+    try:
+        return spreadsheet.get_worksheet(0)
+    except Exception:
+        return None
+
+
+def log_qa_pair(question: str, answer: str) -> bool:
+    """Log question and answer to Google Sheets (primary), CSV file (fallback), and session state.
+    Returns True if logged to Google Sheets, False otherwise."""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
-    try:
-        log_entry = {
-            'timestamp': timestamp,
-            'question': question,
-            'answer': answer
-        }
-        
-        file_exists = os.path.exists(QA_LOG_FILE)
-        df_new = pd.DataFrame([log_entry])
-        if file_exists:
-            df_new.to_csv(QA_LOG_FILE, mode='a', header=False, index=False, encoding='utf-8')
-        else:
-            df_new.to_csv(QA_LOG_FILE, mode='w', header=True, index=False, encoding='utf-8')
-        
-        # Debug: log that we successfully wrote
-        logging.info(f"Successfully logged Q&A pair to {QA_LOG_FILE}")
-    except Exception as e:
-        # Log error but don't interrupt user experience
-        logging.error(f"Error logging Q&A pair: {e}")
-        # Also print to stderr for Streamlit logs
-        import sys
-        print(f"ERROR: Failed to log Q&A pair: {e}", file=sys.stderr)
+    log_entry = {
+        'timestamp': timestamp,
+        'question': question,
+        'answer': answer
+    }
+    
+    # Store in session state (persists during session)
+    if 'qa_logs' not in st.session_state:
+        st.session_state.qa_logs = []
+    st.session_state.qa_logs.append(log_entry)
+    
+    # Try to log to Google Sheets first (permanent storage)
+    google_sheets_success = False
+    if GSPREAD_AVAILABLE:
+        try:
+            client = get_google_sheets_client()
+            if client:
+                # Get spreadsheet ID from secrets or use default
+                spreadsheet_id = None
+                sheet_name = GOOGLE_SHEETS_SHEET_NAME
+                
+                try:
+                    if 'google_sheets' in st.secrets:
+                        spreadsheet_id = st.secrets['google_sheets'].get('spreadsheet_id', GOOGLE_SHEETS_SPREADSHEET_ID)
+                        sheet_name = st.secrets['google_sheets'].get('sheet_name', GOOGLE_SHEETS_SHEET_NAME)
+                    else:
+                        spreadsheet_id = GOOGLE_SHEETS_SPREADSHEET_ID
+                except (AttributeError, KeyError):
+                    spreadsheet_id = GOOGLE_SHEETS_SPREADSHEET_ID
+                
+                if spreadsheet_id:
+                    spreadsheet = client.open_by_key(spreadsheet_id)
+                    worksheet = _get_worksheet(spreadsheet, sheet_name)
+                    if worksheet is None:
+                        worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=2)
+                        worksheet.append_row(['question', 'answer'])
+                    # Match your sheet: two columns "question", "answer"
+                    worksheet.append_row([question, answer])
+                    google_sheets_success = True
+                    logging.info("Successfully logged Q&A pair to Google Sheets")
+        except Exception as e:
+            logging.warning(f"Error logging to Google Sheets: {e}")
+            # Continue to CSV fallback
+    
+    # Fallback to CSV file if Google Sheets failed or not configured
+    if not google_sheets_success:
+        try:
+            file_exists = os.path.exists(QA_LOG_FILE)
+            df_new = pd.DataFrame([log_entry])
+            if file_exists:
+                df_new.to_csv(QA_LOG_FILE, mode='a', header=False, index=False, encoding='utf-8')
+            else:
+                df_new.to_csv(QA_LOG_FILE, mode='w', header=True, index=False, encoding='utf-8')
+            
+            logging.info(f"Successfully logged Q&A pair to {QA_LOG_FILE}")
+        except Exception as e:
+            logging.error(f"Error logging Q&A pair to file: {e}")
+            import sys
+            print(f"ERROR: Failed to log Q&A pair to file: {e}", file=sys.stderr)
+    
+    return google_sheets_success
 
-def query_website_content(query: str, articles: List[Dict], client: OpenAI) -> str:
-    """Use LLM to answer questions about website content using semantic search."""
+def query_website_content(query: str, articles: List[Dict], client: OpenAI) -> Dict:
+    """Use LLM to answer questions about website content using semantic search.
+    
+    Returns:
+        Dict with 'answer' (str) and 'sources' (List[Dict]) - list of article dicts used as sources
+    """
     # Use semantic search to find most relevant articles
     with st.spinner("Finding relevant articles..."):
         similar_articles = find_similar_articles(query, articles, client, top_k=25)
@@ -809,14 +919,25 @@ Answer based only on the content provided above. Include specific URLs when ment
         answer = response.choices[0].message.content
         
         # Log the Q&A pair
-        log_qa_pair(query, answer)
+        logged_to_sheets = log_qa_pair(query, answer)
         
-        return answer
+        # Return top 5 most relevant articles as sources (these are the ones most likely used)
+        sources = context_articles[:5]
+        
+        return {
+            'answer': answer,
+            'sources': sources,
+            'logged_to_sheets': logged_to_sheets
+        }
     except Exception as e:
         error_msg = f"Error: {str(e)}"
         # Log errors too
-        log_qa_pair(query, error_msg)
-        return error_msg
+        logged_to_sheets = log_qa_pair(query, error_msg)
+        return {
+            'answer': error_msg,
+            'sources': [],
+            'logged_to_sheets': logged_to_sheets
+        }
 
 # ============================================================================
 # STREAMLIT APP
@@ -838,6 +959,48 @@ def main():
         st.session_state.chat_history = []
     if 'show_logs' not in st.session_state:
         st.session_state.show_logs = False
+    if 'qa_logs' not in st.session_state:
+        st.session_state.qa_logs = []
+        # Try to load existing logs from Google Sheets first, then CSV file
+        loaded_from_sheets = False
+        
+        # Try Google Sheets first
+        if GSPREAD_AVAILABLE:
+            try:
+                client = get_google_sheets_client()
+                if client:
+                    spreadsheet_id = None
+                    sheet_name = GOOGLE_SHEETS_SHEET_NAME
+                    
+                    try:
+                        if 'google_sheets' in st.secrets:
+                            spreadsheet_id = st.secrets['google_sheets'].get('spreadsheet_id', GOOGLE_SHEETS_SPREADSHEET_ID)
+                            sheet_name = st.secrets['google_sheets'].get('sheet_name', GOOGLE_SHEETS_SHEET_NAME)
+                        else:
+                            spreadsheet_id = GOOGLE_SHEETS_SPREADSHEET_ID
+                    except (AttributeError, KeyError):
+                        spreadsheet_id = GOOGLE_SHEETS_SPREADSHEET_ID
+                    
+                    if spreadsheet_id:
+                        spreadsheet = client.open_by_key(spreadsheet_id)
+                        worksheet = _get_worksheet(spreadsheet, sheet_name)
+                        if worksheet:
+                            records = worksheet.get_all_records()
+                            if records:
+                                st.session_state.qa_logs = records
+                                loaded_from_sheets = True
+                                logging.info(f"Loaded {len(records)} Q&A pairs from Google Sheets")
+            except Exception as e:
+                logging.warning(f"Could not load logs from Google Sheets: {e}")
+        
+        # Fallback to CSV file if Google Sheets didn't work
+        if not loaded_from_sheets and os.path.exists(QA_LOG_FILE):
+            try:
+                df_existing = pd.read_csv(QA_LOG_FILE)
+                st.session_state.qa_logs = df_existing.to_dict('records')
+                logging.info(f"Loaded {len(st.session_state.qa_logs)} Q&A pairs from CSV file")
+            except Exception as e:
+                logging.warning(f"Could not load existing logs from CSV: {e}")
     
     # Profile Collection Page
     if st.session_state.user_profile is None:
@@ -894,7 +1057,7 @@ def main():
             st.stop()
         
         # Header
-        col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
+        col1, col2, col3, col4, col5 = st.columns([2.5, 1, 1, 1, 0.8])
         with col1:
             st.title("Via Content Hub")
         with col2:
@@ -909,56 +1072,197 @@ def main():
                 st.session_state.articles = []
                 st.rerun()
         with col4:
-            if st.button("📊 View Logs"):
+            log_count = len(st.session_state.get('qa_logs', []))
+            button_label = f"📊 Logs ({log_count})" if log_count > 0 else "📊 View Logs"
+            if st.button(button_label):
                 st.session_state.show_logs = not st.session_state.get('show_logs', False)
                 st.rerun()
+        with col5:
+            # Always show log count badge
+            log_count = len(st.session_state.get('qa_logs', []))
+            if log_count > 0:
+                st.metric("Q&A Logged", log_count, label_visibility="collapsed")
         
         # Show user profile info
         user_type_display = "City" if user_profile['is_city'] else "Transit Agency"
         st.info(f"👤 Profile: {user_type_display} in {user_profile['state']}")
+        
+        # Show Google Sheets setup status if not configured
+        try:
+            status = get_google_sheets_config_status()
+            if not status['configured']:
+                st.warning(
+                    "⚠️ **Google Sheets not configured** — Logs will only be saved to CSV (may not persist in Streamlit Cloud)."
+                )
+                with st.expander("What to add in Streamlit Secrets", expanded=True):
+                    st.markdown(f"**Reason:** {status['reason']}")
+                    st.markdown(f"**Fix:** {status['hint']}")
+                    st.markdown("See **GOOGLE_SHEETS_SETUP.md** for step-by-step setup (create sheet, service account, share sheet, then add to Secrets).")
+        except Exception:
+            pass
         
         # Show logs if requested
         if st.session_state.show_logs:
             st.markdown("---")
             st.header("📊 Q&A Log")
             
-            # Show file path info
-            import os
-            full_path = os.path.abspath(QA_LOG_FILE)
-            st.caption(f"File location: `{full_path}`")
+            # Get logs from session state (primary source)
+            qa_logs = st.session_state.get('qa_logs', [])
             
-            if os.path.exists(QA_LOG_FILE):
-                try:
-                    # Get file size
-                    file_size = os.path.getsize(QA_LOG_FILE)
-                    st.success(f"📄 Found log file ({file_size} bytes)")
-                    
-                    df_logs = pd.read_csv(QA_LOG_FILE)
-                    st.success(f"✅ Loaded {len(df_logs)} Q&A pairs from log file")
-                    
-                    if len(df_logs) > 0:
-                        st.dataframe(df_logs, width='stretch', hide_index=True)
-                        
-                        # Download button
-                        csv = df_logs.to_csv(index=False).encode('utf-8')
-                        st.download_button(
-                            label="📥 Download Log as CSV",
-                            data=csv,
-                            file_name=f"qa_log_{datetime.now().strftime('%Y%m%d')}.csv",
-                            mime="text/csv"
-                        )
-                        
-                        st.info(f"Total Q&A pairs logged: {len(df_logs)}")
+            if qa_logs:
+                # Convert to DataFrame for display
+                df_logs = pd.DataFrame(qa_logs)
+                
+                # Show stats
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Q&A Pairs", len(df_logs))
+                with col2:
+                    if 'timestamp' in df_logs.columns:
+                        latest = df_logs['timestamp'].max() if len(df_logs) > 0 else "N/A"
+                        st.metric("Latest Entry", latest[:10] if latest != "N/A" else "N/A")
+                with col3:
+                    # Check storage status
+                    storage_status = "⚠️ Unknown"
+                    storage_source = "Unknown"
+                    if GSPREAD_AVAILABLE:
+                        try:
+                            client = get_google_sheets_client()
+                            if client:
+                                storage_status = "✅ Google Sheets"
+                                storage_source = "Google Sheets"
+                            else:
+                                storage_status = "⚠️ CSV Only"
+                                storage_source = "CSV"
+                        except:
+                            storage_status = "⚠️ CSV Only"
+                            storage_source = "CSV"
                     else:
-                        st.info("Log file exists but is empty. Ask some questions to start logging!")
-                except Exception as e:
-                    st.error(f"Error reading log file: {e}")
-                    st.code(str(e))
+                        storage_status = "⚠️ CSV Only"
+                        storage_source = "CSV"
+                    st.metric("Storage", storage_status)
+                with col4:
+                    # Show link to Google Sheet if available
+                    if storage_source == "Google Sheets":
+                        try:
+                            spreadsheet_id = None
+                            try:
+                                if 'google_sheets' in st.secrets:
+                                    spreadsheet_id = st.secrets['google_sheets'].get('spreadsheet_id', GOOGLE_SHEETS_SPREADSHEET_ID)
+                                else:
+                                    spreadsheet_id = GOOGLE_SHEETS_SPREADSHEET_ID
+                            except (AttributeError, KeyError):
+                                spreadsheet_id = GOOGLE_SHEETS_SPREADSHEET_ID
+                            
+                            if spreadsheet_id:
+                                sheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+                                st.markdown(f"[📊 View in Sheets]({sheet_url})")
+                        except:
+                            pass
+                
+                st.markdown("")
+                
+                # Display logs
+                st.dataframe(df_logs, width='stretch', hide_index=True, use_container_width=True)
+                
+                st.markdown("")
+                
+                # Download buttons
+                col1, col2 = st.columns(2)
+                with col1:
+                    # Download from session state (most up-to-date)
+                    csv = df_logs.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="📥 Download Current Logs (CSV)",
+                        data=csv,
+                        file_name=f"qa_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                        help="Download all logs from current session"
+                    )
+                with col2:
+                    # Try to download from file if it exists
+                    if os.path.exists(QA_LOG_FILE):
+                        try:
+                            with open(QA_LOG_FILE, 'rb') as f:
+                                file_data = f.read()
+                            st.download_button(
+                                label="📥 Download File Logs (CSV)",
+                                data=file_data,
+                                file_name=f"qa_log_file_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                mime="text/csv",
+                                help="Download logs from saved file"
+                            )
+                        except Exception as e:
+                            st.caption(f"File read error: {e}")
+                    else:
+                        st.caption("File not yet created")
+                
+                # Storage info
+                st.markdown("---")
+                if storage_source == "Google Sheets":
+                    try:
+                        spreadsheet_id = None
+                        try:
+                            if 'google_sheets' in st.secrets:
+                                spreadsheet_id = st.secrets['google_sheets'].get('spreadsheet_id', GOOGLE_SHEETS_SPREADSHEET_ID)
+                            else:
+                                spreadsheet_id = GOOGLE_SHEETS_SPREADSHEET_ID
+                        except (AttributeError, KeyError):
+                            spreadsheet_id = GOOGLE_SHEETS_SPREADSHEET_ID
+                        
+                        if spreadsheet_id:
+                            sheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+                            st.success(f"✅ Logs are permanently stored in Google Sheets")
+                            st.caption(f"📊 [Open Google Sheet]({sheet_url}) | Sheet ID: `{spreadsheet_id}`")
+                    except:
+                        st.info("💡 Logs are stored in Google Sheets (permanent storage)")
+                else:
+                    if os.path.exists(QA_LOG_FILE):
+                        full_path = os.path.abspath(QA_LOG_FILE)
+                        file_size = os.path.getsize(QA_LOG_FILE)
+                        st.warning(f"⚠️ Logs are stored locally in CSV file (may not persist in Streamlit Cloud)")
+                        st.caption(f"📄 File location: `{full_path}` ({file_size} bytes)")
+                        st.info("💡 **Tip:** Set up Google Sheets for permanent storage across sessions. See `GOOGLE_SHEETS_SETUP.md`")
+                    else:
+                        st.warning(f"⚠️ Logs are only in session memory. They will be lost when the session ends.")
+                        st.caption(f"💡 **Important:** Set up Google Sheets for permanent storage. See `GOOGLE_SHEETS_SETUP.md`")
+                
+                # Refresh button to reload from Google Sheets
+                if storage_source == "Google Sheets":
+                    if st.button("🔄 Refresh from Google Sheets"):
+                        try:
+                            client = get_google_sheets_client()
+                            if client:
+                                spreadsheet_id = None
+                                sheet_name = GOOGLE_SHEETS_SHEET_NAME
+                                try:
+                                    if 'google_sheets' in st.secrets:
+                                        spreadsheet_id = st.secrets['google_sheets'].get('spreadsheet_id', GOOGLE_SHEETS_SPREADSHEET_ID)
+                                        sheet_name = st.secrets['google_sheets'].get('sheet_name', GOOGLE_SHEETS_SHEET_NAME)
+                                    else:
+                                        spreadsheet_id = GOOGLE_SHEETS_SPREADSHEET_ID
+                                except (AttributeError, KeyError):
+                                    spreadsheet_id = GOOGLE_SHEETS_SPREADSHEET_ID
+                                
+                                if spreadsheet_id:
+                                    spreadsheet = client.open_by_key(spreadsheet_id)
+                                    worksheet = _get_worksheet(spreadsheet, sheet_name)
+                                    if worksheet:
+                                        records = worksheet.get_all_records()
+                                        st.session_state.qa_logs = records
+                                        st.success(f"✅ Refreshed! Loaded {len(records)} Q&A pairs from Google Sheets")
+                                        st.rerun()
+                                    else:
+                                        st.error("Could not open worksheet. Check sheet name or use first tab with headers 'question', 'answer'.")
+                        except Exception as e:
+                            st.error(f"Error refreshing from Google Sheets: {e}")
+                
             else:
-                st.warning(f"Log file not found at: `{full_path}`")
-                st.info("Ask some questions to start logging!")
-                st.info(f"File will be created as: `{QA_LOG_FILE}`")
+                st.info("No Q&A pairs logged yet. Ask some questions to start logging!")
+                if os.path.exists(QA_LOG_FILE):
+                    st.caption(f"Note: Log file exists at `{os.path.abspath(QA_LOG_FILE)}` but is empty or couldn't be loaded.")
             
+            st.markdown("")
             if st.button("Close Logs"):
                 st.session_state.show_logs = False
                 st.rerun()
@@ -975,6 +1279,25 @@ def main():
             for message in st.session_state.chat_history:
                 with st.chat_message(message["role"]):
                     st.markdown(message["content"])
+                    # Display sources if this is an assistant message with sources
+                    if message["role"] == "assistant" and message.get("sources"):
+                        st.markdown("---")
+                        st.markdown("**Sources:**")
+                        for article in message["sources"]:
+                            col1, col2 = st.columns([1, 3])
+                            with col1:
+                                if article.get('thumbnail'):
+                                    try:
+                                        st.image(article['thumbnail'], width=100)
+                                    except:
+                                        st.write("")  # Empty space if image fails to load
+                                else:
+                                    st.write("")  # Empty space if no thumbnail
+                            with col2:
+                                st.markdown(f"**{article['title']}**")
+                                if article.get('description'):
+                                    st.caption(article['description'][:150] + "...")
+                                st.markdown(f"[Read more →]({article['url']})")
             
             # Chat input
             if prompt := st.chat_input("Ask a question about Via..."):
@@ -988,23 +1311,64 @@ def main():
                     with st.spinner("Thinking..."):
                         try:
                             if st.session_state.articles:
-                                response = query_website_content(prompt, st.session_state.articles, client)
+                                result = query_website_content(prompt, st.session_state.articles, client)
                                 # query_website_content already logs the Q&A pair
+                                response_text = result.get('answer', '')
+                                sources = result.get('sources', [])
+                                logged_to_sheets = result.get('logged_to_sheets', False)
                             else:
-                                response = "I'm sorry, but I don't have access to the website content right now. Please refresh the cache or try again later."
-                                # Log this case too
-                                log_qa_pair(prompt, response)
-                            st.markdown(response)
-                            st.session_state.chat_history.append({"role": "assistant", "content": response})
-                            # Show confirmation that it was logged
-                            st.caption("✅ Logged to qa_log.csv")
+                                response_text = "I'm sorry, but I don't have access to the website content right now. Please refresh the cache or try again later."
+                                sources = []
+                                logged_to_sheets = log_qa_pair(prompt, response_text)
+                            
+                            st.markdown(response_text)
+                            
+                            # Display sources if available
+                            if sources:
+                                st.markdown("---")
+                                st.markdown("**Sources:**")
+                                for article in sources:
+                                    col1, col2 = st.columns([1, 3])
+                                    with col1:
+                                        if article.get('thumbnail'):
+                                            try:
+                                                st.image(article['thumbnail'], width=100)
+                                            except:
+                                                st.write("")  # Empty space if image fails to load
+                                        else:
+                                            st.write("")  # Empty space if no thumbnail
+                                    with col2:
+                                        st.markdown(f"**{article['title']}**")
+                                        if article.get('description'):
+                                            st.caption(article['description'][:150] + "...")
+                                        st.markdown(f"[Read more →]({article['url']})")
+                            
+                            # Store in chat history with sources
+                            st.session_state.chat_history.append({
+                                "role": "assistant", 
+                                "content": response_text,
+                                "sources": sources
+                            })
+                            
+                            # Show confirmation: where it was logged
+                            log_count = len(st.session_state.get('qa_logs', []))
+                            if logged_to_sheets:
+                                st.caption(f"✅ Logged to Google Sheets (Total: {log_count} Q&A pairs)")
+                            else:
+                                st.caption(f"✅ Logged to CSV (Total: {log_count} Q&A pairs)")
                         except Exception as e:
                             error_msg = f"Error: {str(e)}"
                             st.error(error_msg)
-                            st.session_state.chat_history.append({"role": "assistant", "content": error_msg})
-                            # Log errors too
-                            log_qa_pair(prompt, error_msg)
-                            st.caption("✅ Logged to qa_log.csv")
+                            st.session_state.chat_history.append({
+                                "role": "assistant", 
+                                "content": error_msg,
+                                "sources": []
+                            })
+                            logged_to_sheets = log_qa_pair(prompt, error_msg)
+                            if logged_to_sheets:
+                                st.caption("✅ Logged to Google Sheets")
+                            else:
+                                st.caption("✅ Logged to CSV")
         
         with col2:
             st.header("📚 Recommended Articles")

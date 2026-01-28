@@ -29,10 +29,37 @@ pip install -r requirements.txt
 }
 ```
 
-3. Run the app:
+3. Run the app locally (choose one method):
+
+**Option A: Using the run script (recommended)**
 ```bash
-streamlit run via_web_app.py
+./run_local.sh
 ```
+
+**Option B: Direct Streamlit command**
+```bash
+python3 -m streamlit run via_web_app.py
+```
+
+**Note:** If you get a "command not found" error, make sure Streamlit is installed:
+```bash
+pip install -r requirements.txt
+```
+
+If you're using a virtual environment, activate it first:
+```bash
+# Create virtual environment (if needed)
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the app
+python3 -m streamlit run via_web_app.py
+```
+
+The app will open in your browser at `http://localhost:8501`. Test your changes locally before pushing to GitHub!
 
 ### Streamlit Cloud Deployment
 

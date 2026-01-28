@@ -40,32 +40,27 @@
 6. Give it **Editor** permissions
 7. Click "Send"
 
-### 4. Add to Streamlit Secrets
-1. Open the JSON file you downloaded
-2. Copy the entire contents
-3. In Streamlit Cloud, go to your app → Settings → Secrets
-4. Add:
+### 4. Add to Streamlit Secrets (Streamlit Cloud)
+
+1. In **Streamlit Cloud**: open your app → **Settings** → **Secrets**.
+2. Add a **`[google_sheets]`** section with **two keys**:
+   - `spreadsheet_id` — your sheet’s ID from the URL (the part between `/d/` and `/edit`).
+   - `service_account_json` — the **entire** contents of the JSON file you downloaded (paste as one block).
+
+**Format in Secrets:**
 
 ```toml
 [google_sheets]
-spreadsheet_id = "your-spreadsheet-id-here"
+spreadsheet_id = "1Qu26woHPnzzPcKUEY-_0QkORM5AZM2PGM38qB2FWpu4"
 sheet_name = "Q&A Log"
-service_account_json = '''
-{
-  "type": "service_account",
-  "project_id": "...",
-  "private_key_id": "...",
-  "private_key": "...",
-  "client_email": "...",
-  ...
-}
-'''
+service_account_json = """{"type": "service_account", "project_id": "your-project", "private_key_id": "...", "private_key": "-----BEGIN PRIVATE KEY-----\\nYOUR_KEY_LINES\\n-----END PRIVATE KEY-----\\n", "client_email": "your-sa@project.iam.gserviceaccount.com", "client_id": "...", "auth_uri": "https://accounts.google.com/o/oauth2/auth", "token_uri": "https://oauth2.googleapis.com/token", "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs", "client_x509_cert_url": "..."}"""
 ```
 
-**Important:** 
-- Replace `your-spreadsheet-id-here` with your actual spreadsheet ID
-- Paste the entire JSON content between the triple quotes
-- The `sheet_name` is optional (defaults to "Q&A Log")
+**Important:**
+- **Spreadsheet ID:** Use your real ID (e.g. from the sheet URL).
+- **JSON:** Paste the full JSON. Keep it on **one line** in Secrets, with `\n` for newlines inside `private_key` (e.g. `"-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"`). If your editor allows multi-line, you can paste the pretty-printed JSON; the app will accept either.
+- **Share the sheet** with the `client_email` from the JSON (Editor access), or the app will get "Permission denied".
+- After saving Secrets, **redeploy or refresh** the app so it picks up the new config.
 
 ### 5. Test It!
 Ask a question in the app and check your Google Sheet - you should see the Q&A appear!

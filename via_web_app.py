@@ -1284,8 +1284,8 @@ def main():
                         st.markdown("---")
                         st.markdown("**Sources:**")
                         for article in message["sources"]:
-                            col1, col2 = st.columns([1, 3])
-                            with col1:
+                            thumb_col, text_col = st.columns([1, 3])
+                            with thumb_col:
                                 if article.get('thumbnail'):
                                     try:
                                         st.image(article['thumbnail'], width=100)
@@ -1293,7 +1293,7 @@ def main():
                                         st.write("")  # Empty space if image fails to load
                                 else:
                                     st.write("")  # Empty space if no thumbnail
-                            with col2:
+                            with text_col:
                                 st.markdown(f"**{article['title']}**")
                                 if article.get('description'):
                                     st.caption(article['description'][:150] + "...")
@@ -1328,8 +1328,8 @@ def main():
                                 st.markdown("---")
                                 st.markdown("**Sources:**")
                                 for article in sources:
-                                    col1, col2 = st.columns([1, 3])
-                                    with col1:
+                                    thumb_col, text_col = st.columns([1, 3])
+                                    with thumb_col:
                                         if article.get('thumbnail'):
                                             try:
                                                 st.image(article['thumbnail'], width=100)
@@ -1337,7 +1337,7 @@ def main():
                                                 st.write("")  # Empty space if image fails to load
                                         else:
                                             st.write("")  # Empty space if no thumbnail
-                                    with col2:
+                                    with text_col:
                                         st.markdown(f"**{article['title']}**")
                                         if article.get('description'):
                                             st.caption(article['description'][:150] + "...")
